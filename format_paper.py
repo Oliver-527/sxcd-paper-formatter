@@ -1,195 +1,296 @@
 #!/usr/bin/env python3
-"""山西财经大学本科学年论文自动格式化脚本"""
+"""
+山西财经大学本科学年论文自动格式化工具
+依据：附件1《山西财经大学本科学年论文内容与格式规范》
+
+用法：python format_paper.py <论文.docx> [年级]
+示例：python format_paper.py 论文主体.docx 2024
+"""
 
 import sys
 import os
 import re
 from docx import Document
-from docx.shared import Pt, Cm, Inches, Emu, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.enum.section import WD_ORIENT
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from copy import deepcopy
 
 
-def set_page_margins(section):
-    """设置A4页面和页边距"""
-    section.page_width = Cm(21.0)
-    section.page_height = Cm(29.7)
-    section.top_margin = Cm(3.0)
-    section.bottom_margin = Cm(2.5)
-    section.left_margin = Cm(2.5)
-    section.right_margin = Cm(2.0)
+# ============================================================
+# 格式参数
+# ============================================================
+PAGE_TOP = Cm(3.0)
+PAGE_BOTTOM = Cm(2.5)
+PAGE_LEFT = Cm(2.5)
+PAGE_RIGHT = Cm(2.0)
+
+BODY_FONT = '宋体'
+BODY_SIZE = Pt(12)
+BODY_INDENT = Cm(0.74)
+BODY_LINE_SPACING = 1.25
+
+L1_FONT = '黑体'
+L1_SIZE = Pt(16)
+L1_ALIGN = WD_ALIGN_PARAGRAPH.CENTER
+L1_BEFORE = Pt(12)
+L1_AFTER = Pt(12)
+
+L2_FONT = '宋体'
+L2_SIZE = Pt(14)
+L2_ALIGN = WD_ALIGN_PARAGRAPH.LEFT
+
+L3_FONT = '宋体'
+L3_SIZE = Pt(12)
+L3_ALIGN = WD_ALIGN_PARAGRAPH.LEFT
+
+HEADER_FONT = '宋体'
+HEADER_SIZE = Pt(9)
 
 
-def set_header_footer(section, grade="20XX"):
-    """设置页眉"""
-    header = section.header
-    header.is_linked_to_previous = False
-    # Clear existing
-    for p in header.paragraphs:
-        p.clear()
+def detect(text):
+    """
+    检测文本首行标题级别。
+    返回: (level, heading_text) 或 (None, None)
 
-    # Odd page header (right-aligned)
-    # Use different first page setting
-    section.different_first_page_header_footer = True
+    标题类型:
+      一级(L1): "1  引  言"、"一、xxx"、摘要/Abstract/目录/参考文献/致谢/附录
+      二级(L2): "1.1  xxx"、"（一）xxx"
+      三级(L3): "1.1.1  xxx"
+    """
+    if not text:
+        return None, None
 
-    hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
-    hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    hp.paragraph_format.space_before = Pt(0)
-    hp.paragraph_format.space_after = Pt(0)
-    run = hp.add_run(f"山西财经大学{grade}级本科生学年论文")
-    run.font.size = Pt(9)
-    run.font.name = "宋体"
-    run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+    first_line = text.strip().split('\n')[0].strip()
+
+    # --- L1: "1  引  言" (Arabic number + 2+ spaces + content) ---
+    if re.match(r'^\d+\s{2,}\S', first_line) and len(first_line) < 40:
+        return 1, first_line
+
+    # --- L1: "一、xxx" (Chinese numeral + 、) ---
+    if re.match(r'^[一二三四五六七八九十]+、', first_line) and len(first_line) < 30:
+        return 1, first_line
+
+    # --- L1: 特殊节名称 ---
+    if first_line in ['摘要', '摘 要', 'Abstract', 'ABSTRACT',
+                       '目录', '目 录', '参考文献', '参考 文献',
+                       '致谢', '致 谢', '附录', '附 录',
+                       '导论', '导 论', '结语', '结 语']:
+        return 1, first_line
+
+    # --- L3: "1.1.1  xxx" ---
+    if re.match(r'^\d+\.\d+\.\d+\s', first_line) and len(first_line) < 50:
+        return 3, first_line
+
+    # --- L2: "1.1  xxx" ---
+    if re.match(r'^\d+\.\d+\s', first_line) and len(first_line) < 40:
+        return 2, first_line
+
+    # --- L2: "（一）xxx" ---
+    if re.match(r'^（[一二三四五六七八九十]+）', first_line) and len(first_line) < 30:
+        return 2, first_line
+
+    return None, None
 
 
-def set_paragraph_format(para, font_name="宋体", font_size=Pt(12),
-                         bold=False, alignment=None,
-                         first_line_indent=None,
-                         space_before=Pt(0), space_after=Pt(0),
-                         line_spacing=1.25):
-    """通用段落格式设置"""
+def is_ref(text):
+    """检测是否为参考文献条目: [n] xxx"""
+    return bool(re.match(r'^\[\d+\]', text.strip()))
+
+
+def setup_pages(doc, grade):
+    """页面设置 + 页眉"""
+    for section in doc.sections:
+        section.page_width = Cm(21.0)
+        section.page_height = Cm(29.7)
+        section.top_margin = PAGE_TOP
+        section.bottom_margin = PAGE_BOTTOM
+        section.left_margin = PAGE_LEFT
+        section.right_margin = PAGE_RIGHT
+        section.different_first_page_header_footer = True
+
+        header = section.header
+        header.is_linked_to_previous = False
+        for p in header.paragraphs:
+            p.clear()
+        hp = header.paragraphs[0]
+        hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        hp.paragraph_format.space_before = Pt(0)
+        hp.paragraph_format.space_after = Pt(0)
+        run = hp.add_run(f'山西财经大学{grade}级本科生学年论文')
+        run.font.size = HEADER_SIZE
+        run.font.name = HEADER_FONT
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), HEADER_FONT)
+
+
+def fmt_runs(para, font_name, font_size, bold, alignment):
+    """格式化段落中所有 run"""
     pf = para.paragraph_format
-    pf.space_before = space_before
-    pf.space_after = space_after
-    pf.line_spacing = line_spacing
-
-    if alignment is not None:
-        para.alignment = alignment
-
-    if first_line_indent is not None:
-        pf.first_line_indent = first_line_indent
-
+    pf.line_spacing = BODY_LINE_SPACING
+    para.alignment = alignment
     for run in para.runs:
         run.font.size = font_size
         run.font.name = font_name
         run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+        run._element.rPr.rFonts.set(qn('w:ascii'), font_name)
         run.font.bold = bold
 
 
-def format_body_paragraph(para):
-    """格式化正文段落"""
-    text = para.text.strip()
-    if not text:
-        return
-
-    set_paragraph_format(para, font_name="宋体", font_size=Pt(12),
-                         first_line_indent=Cm(0.74),  # ~2 chars
-                         line_spacing=1.25)
-
-
-def identify_and_format_heading(para):
-    """识别并格式化标题"""
-    text = para.text.strip()
-    if not text:
-        return False
-
-    # Match heading patterns like "一、", "（一）", "1.", "1.1", "导论", "结语"
-    level1_patterns = [
-        r'^[一二三四五六七八九十]、',  # 一、二、
-        r'^(导论|导 论|结语|结 语|参考文献|参考 文献|致谢|致 谢|附录|附 录)$',
-        r'^Abstract$',
-    ]
-    level2_patterns = [
-        r'^（[一二三四五六七八九十]）',  # （一）（二）
-        r'^\d+\.\d+\s',  # 1.1
-    ]
-    level3_patterns = [
-        r'^\d+\.\d+\.\d+\s',  # 1.1.1
-    ]
-
-    for pattern in level1_patterns:
-        if re.match(pattern, text):
-            set_paragraph_format(para, font_name="黑体", font_size=Pt(16),
-                               bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                               space_before=Pt(12), space_after=Pt(12),
-                               line_spacing=1.25)
-            return True
-
-    for pattern in level2_patterns:
-        if re.match(pattern, text):
-            set_paragraph_format(para, font_name="宋体", font_size=Pt(14),
-                               bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                               line_spacing=1.25)
-            return True
-
-    for pattern in level3_patterns:
-        if re.match(pattern, text):
-            set_paragraph_format(para, font_name="宋体", font_size=Pt(12),
-                               bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                               line_spacing=1.25)
-            return True
-
-    return False
-
-
-def format_paper(input_path, grade="20XX"):
+def split_body(doc):
     """
-    主函数：格式化学年论文
-
-    Args:
-        input_path: 输入论文路径
-        grade: 年级，如 "2024"
+    将论文正文长段落按标题边界拆分为独立段落。
+    论文正文常是一个巨段，标题和正文混在一起，必须先拆分。
     """
-    if not os.path.exists(input_path):
-        print(f"错误：文件不存在 - {input_path}")
-        return None
+    heading_boundary = re.compile(r'\n(?=\d+(?:\.\d+)*\s{2,}\S)')
 
-    doc = Document(input_path)
+    modified = True
+    passes = 0
+    while modified and passes < 10:
+        modified = False
+        passes += 1
 
-    # === 1. 页面设置 ===
-    for section in doc.sections:
-        set_page_margins(section)
-        set_header_footer(section, grade)
+        for i in range(len(doc.paragraphs) - 1, -1, -1):
+            para = doc.paragraphs[i]
+            text = para.text
 
-    # === 2. 遍历段落，格式化 ===
+            if len(text) < 200:
+                continue
+
+            # 检查是否包含多个标题
+            test_text = '\n' + text
+            matches = heading_boundary.findall(test_text)
+            if len(matches) < 2:
+                continue
+
+            # 按标题边界拆分
+            sections = re.split(heading_boundary, test_text)
+            sections = [s.strip() for s in sections if s.strip()]
+            if len(sections) <= 1:
+                continue
+
+            parent = para._element.getparent()
+            insert_idx = list(parent).index(para._element)
+
+            new_elems = []
+            for section_text in sections:
+                p_elem = OxmlElement('w:p')
+                r_elem = OxmlElement('w:r')
+                t_elem = OxmlElement('w:t')
+                t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                t_elem.text = section_text
+                r_elem.append(t_elem)
+                p_elem.append(r_elem)
+                new_elems.append(p_elem)
+
+            for elem in reversed(new_elems):
+                parent.insert(insert_idx + 1, elem)
+
+            parent.remove(para._element)
+            modified = True
+            break
+
+    return doc
+
+
+def format_all(doc):
+    """对所有段落应用格式"""
+    counts = {'l1': 0, 'l2': 0, 'l3': 0, 'body': 0, 'ref': 0}
+
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
             continue
 
-        # 跳过封面和学术承诺相关的段落（保留原格式）
-        if any(kw in text for kw in ['学校代码', '学术承诺', '使用授权', '签名', '日期']):
-            continue
+        pf = para.paragraph_format
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
 
-        # 识别标题
-        if identify_and_format_heading(para):
-            continue
+        level, _ = detect(text)
 
-        # 格式化正文
-        format_body_paragraph(para)
+        if level == 1:
+            pf.first_line_indent = Cm(0)
+            pf.space_before = L1_BEFORE
+            pf.space_after = L1_AFTER
+            fmt_runs(para, L1_FONT, L1_SIZE, True, L1_ALIGN)
+            counts['l1'] += 1
 
-    # === 3. 保存 ===
+        elif level == 2:
+            pf.first_line_indent = Cm(0)
+            fmt_runs(para, L2_FONT, L2_SIZE, True, L2_ALIGN)
+            counts['l2'] += 1
+
+        elif level == 3:
+            pf.first_line_indent = Cm(0)
+            fmt_runs(para, L3_FONT, L3_SIZE, True, L3_ALIGN)
+            counts['l3'] += 1
+
+        elif is_ref(text):
+            pf.first_line_indent = Cm(0)
+            fmt_runs(para, BODY_FONT, BODY_SIZE, False, WD_ALIGN_PARAGRAPH.LEFT)
+            counts['ref'] += 1
+
+        else:
+            pf.first_line_indent = BODY_INDENT
+            fmt_runs(para, BODY_FONT, BODY_SIZE, False, WD_ALIGN_PARAGRAPH.LEFT)
+            counts['body'] += 1
+
+    return counts
+
+
+def format_paper(input_path, grade="20XX"):
+    """
+    主入口：格式化学年论文
+
+    Args:
+        input_path: .docx 论文路径
+        grade: 年级 (如 "2024")
+    Returns:
+        output_path: 输出文件路径
+    """
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"File not found: {input_path}")
+
     dir_name = os.path.dirname(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
     output_path = os.path.join(dir_name, f"{base_name}_formatted.docx")
 
-    doc.save(output_path)
-    print(f"格式化完成！输出文件：{output_path}")
+    doc = Document(input_path)
 
-    # === 4. 报告修改内容 ===
-    print("""
-已应用的格式修改：
-  ✅ 纸张：A4
-  ✅ 页边距：上3cm, 下2.5cm, 左2.5cm, 右2cm
-  ✅ 页眉：山西财经大学{0}级本科生学年论文（小五号宋体）
-  ✅ 正文：小四号宋体，1.25倍行距，首行缩进2字符
-  ✅ 标题层级：一级(三号黑体居中)、二级(四号宋体加粗)、三级(小四号宋体加粗)
-  ✅ 参考文献：小四号宋体
-""".format(grade))
+    # Step 1: Split giant body paragraphs
+    doc = split_body(doc)
+
+    # Step 2: Page setup + headers
+    setup_pages(doc, grade)
+
+    # Step 3: Apply formatting to all paragraphs
+    counts = format_all(doc)
+
+    # Step 4: Save
+    doc.save(output_path)
+
+    # Report
+    print(f"Output: {output_path}")
+    print(f"Page: A4, margins 3.0/2.5/2.5/2.0 cm")
+    print(f"Body: SimSun 12pt, 1.25x line spacing, first-line indent 2 chars")
+    print(f"L1: HeiTi 16pt bold centered, L2: SimSun 14pt bold left")
+    print(f"Header: SimSun 9pt - Shanxi Univ. of Finance and Economics")
+    print(f"Counts: L1={counts['l1']}, L2={counts['l2']}, L3={counts['l3']}, "
+          f"body={counts['body']}, ref={counts['ref']}")
 
     return output_path
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python format_paper.py <论文.docx> [年级]")
-        print("示例: python format_paper.py 论文主体.docx 2024")
+        print("Usage: python format_paper.py <paper.docx> [grade]")
+        print("Example: python format_paper.py mypaper.docx 2024")
         sys.exit(1)
 
     input_path = sys.argv[1]
     grade = sys.argv[2] if len(sys.argv) > 2 else "20XX"
 
-    format_paper(input_path, grade)
+    try:
+        format_paper(input_path, grade)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
